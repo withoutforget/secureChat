@@ -17,67 +17,95 @@ import (
 	"github.com/withoutforget/secureChat/internal/message"
 )
 
+const SERVER_URL = "http://localhost:8080"
+
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT)
 	defer cancel()
 
 	reader := bufio.NewReader(os.Stdin)
-	creds, err := identity.GenerateCredential()
 
+	creds, err := identity.GenerateCredential()
 	if err != nil {
 		panic("cannot create credentials: " + err.Error())
 	}
-
 	fmt.Printf("ed25519:\"%v\"\n", creds.String())
 
-	client := client.NewClient("http://localhost:8080")
+	c := client.NewClient(SERVER_URL)
 
-	var MyID string
-	var PeerID string
-	var PeerKey string
+	myID, peerID, trustedKey := readSetup(reader, c)
+
+	go keepAlive(ctx, c, myID)
+
+	stream, err := c.Recv(myID)
+	if err != nil {
+		panic("cannot get stream: " + err.Error())
+	}
+
+	secret := doHandshake(c, creds, stream, peerID, trustedKey)
+
+	go recvLoop(ctx, cancel, stream, secret)
+	go sendLoop(ctx, reader, c, peerID, secret)
+
+	<-ctx.Done()
+}
+
+func readSetup(reader *bufio.Reader,
+	c *client.Client) (
+	myID,
+	peerID string,
+	trustedKey []byte,
+) {
 	fmt.Printf("Input your id:")
-	MyID, _ = reader.ReadString('\n')
-	MyID = strings.TrimSpace(MyID)
-	if err := client.Take(MyID); err != nil {
+	myID, _ = reader.ReadString('\n')
+	myID = strings.TrimSpace(myID)
+	if err := c.Take(myID); err != nil {
 		panic(err)
 	}
 
-	go func() {
-		ticker := time.NewTicker(40 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if err := client.Keep(MyID); err != nil {
-					slog.Warn("Cannot keep id", slog.String("err", err.Error()))
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
 	fmt.Printf("Input peer id:")
-	PeerID, _ = reader.ReadString('\n')
-	PeerID = strings.TrimSpace(PeerID)
+	peerID, _ = reader.ReadString('\n')
+	peerID = strings.TrimSpace(peerID)
 
 	fmt.Printf("Input peer ed25519 (or -):")
-	PeerKey, _ = reader.ReadString('\n')
-	PeerKey = strings.TrimSpace(PeerKey)
+	peerKey, _ := reader.ReadString('\n')
+	peerKey = strings.TrimSpace(peerKey)
 
-	var trustedKey []byte
-	if PeerKey != "-" {
-		trustedKey, err = identity.ParseCredential(PeerKey)
+	if peerKey != "-" {
+		var err error
+		trustedKey, err = identity.ParseCredential(peerKey)
 		if err != nil {
 			panic("invalid key: " + err.Error())
 		}
 	}
 
-	stream, err := client.Recv(MyID)
-	if err != nil {
-		panic("cannot get stream: " + err.Error())
-	}
+	return myID, peerID, trustedKey
+}
 
+func keepAlive(ctx context.Context,
+	c *client.Client,
+	myID string,
+) {
+	ticker := time.NewTicker(40 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := c.Keep(myID); err != nil {
+				slog.Warn("Cannot keep id", slog.String("err", err.Error()))
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func doHandshake(c *client.Client,
+	creds *identity.Credential,
+	stream <-chan []byte,
+	peerID string,
+	trustedKey []byte,
+) *message.SecretMessage {
 	secret, err := message.NewSecretMessage()
 	if err != nil {
 		panic("cannot create secret message: " + err.Error())
@@ -87,74 +115,82 @@ func main() {
 	keys := slices.Concat(salt, pb)
 	sig := creds.Sign(keys)
 
-	err = client.Send(PeerID, slices.Concat(keys, sig))
-	if err != nil {
-		panic("cannot send message : " + err.Error())
+	if err := c.Send(peerID, slices.Concat(keys, sig)); err != nil {
+		panic("cannot send message: " + err.Error())
 	}
 
-	auth_response, ok := <-stream
+	authResponse, ok := <-stream
 	if !ok {
 		panic("websocket closed")
 	}
-	salt = auth_response[:len(salt)]
-	pb = auth_response[len(salt) : len(salt)+len(pb)]
-	sig = auth_response[len(salt)+len(pb) : len(salt)+len(pb)+64]
+
+	salt = authResponse[:len(salt)]
+	pb = authResponse[len(salt) : len(salt)+len(pb)]
+	sig = authResponse[len(salt)+len(pb) : len(salt)+len(pb)+64]
+
 	if trustedKey != nil {
-		err = identity.Verify(auth_response[:len(salt)+len(pb)], sig, trustedKey)
-		if err != nil {
-			fmt.Printf("[WARN] ed25519 not verified\n")
+		if err := identity.Verify(authResponse[:len(salt)+len(pb)], sig, trustedKey); err != nil {
+			fmt.Printf("\n[WARN] ed25519 not verified\n\n")
 		}
 	} else {
-		fmt.Printf("[WARN] not using ed25519 allows MITM\n")
+		fmt.Printf("\n[WARN] not using ed25519 allows MITM\n\n")
 	}
 
-	err = secret.SetUpSharedKey(pb, salt)
-	if err != nil {
+	if err := secret.SetUpSharedKey(pb, salt); err != nil {
 		panic("cannot create shared key: " + err.Error())
 	}
 
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case data, ok := <-stream:
-				if !ok {
-					cancel()
-					fmt.Println("websocket closed")
-					return
-				}
-				text, err := secret.ReadMessage(data)
-				if err != nil {
-					fmt.Printf("Cannot decode message:%v\n", err.Error())
-					continue
-				}
-				fmt.Printf("[PEER]:%v\n", string(text))
-			}
-		}
-	}()
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
+	return secret
+}
 
-				input, _ := reader.ReadString('\n')
-				input = strings.TrimSpace(input)
-				if input == "" {
-					continue
-				}
-				encrypted, err := secret.GenerateMessage([]byte(input))
-				if err != nil {
-					fmt.Printf("Cannot encode message:%v\n", err.Error())
-				}
-				err = client.Send(PeerID, encrypted)
-				if err != nil {
-					panic("cannot send message : " + err.Error())
-				}
+func recvLoop(ctx context.Context,
+	cancel context.CancelFunc,
+	stream <-chan []byte,
+	secret *message.SecretMessage,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case data, ok := <-stream:
+			if !ok {
+				cancel()
+				fmt.Println("websocket closed")
+				return
+			}
+			text, err := secret.ReadMessage(data)
+			if err != nil {
+				fmt.Printf("Cannot decode message:%v\n", err.Error())
+				continue
+			}
+			fmt.Printf("[PEER]:%v\n", string(text))
+		}
+	}
+}
+
+func sendLoop(ctx context.Context,
+	reader *bufio.Reader,
+	c *client.Client,
+	peerID string,
+	secret *message.SecretMessage,
+) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			input, _ := reader.ReadString('\n')
+			input = strings.TrimSpace(input)
+			if input == "" {
+				continue
+			}
+			encrypted, err := secret.GenerateMessage([]byte(input))
+			if err != nil {
+				fmt.Printf("Cannot encode message:%v\n", err.Error())
+			}
+			if err := c.Send(peerID, encrypted); err != nil {
+				panic("cannot send message: " + err.Error())
 			}
 		}
-	}()
-	<-ctx.Done()
+	}
 }
