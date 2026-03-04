@@ -3,4 +3,4 @@
     go run cmd/app/main.go
 [doc("Run server")]
 @server:
-    go run cmd/app/main.go
+    go run cmd/server/main.go

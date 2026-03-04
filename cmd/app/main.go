@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/withoutforget/secureChat/internal/client"
+	"github.com/withoutforget/secureChat/internal/identity"
 	"github.com/withoutforget/secureChat/internal/message"
 )
 
@@ -21,11 +22,19 @@ func main() {
 	defer cancel()
 
 	reader := bufio.NewReader(os.Stdin)
+	creds, err := identity.GenerateCredential()
+
+	if err != nil {
+		panic("cannot create credentials: " + err.Error())
+	}
+
+	fmt.Printf("ed25519:\"%v\"\n", creds.String())
 
 	client := client.NewClient("http://localhost:8080")
 
 	var MyID string
 	var PeerID string
+	var PeerKey string
 	fmt.Printf("Input your id:")
 	MyID, _ = reader.ReadString('\n')
 	MyID = strings.TrimSpace(MyID)
@@ -52,6 +61,18 @@ func main() {
 	PeerID, _ = reader.ReadString('\n')
 	PeerID = strings.TrimSpace(PeerID)
 
+	fmt.Printf("Input peer ed25519 (or -):")
+	PeerKey, _ = reader.ReadString('\n')
+	PeerKey = strings.TrimSpace(PeerKey)
+
+	var trustedKey []byte
+	if PeerKey != "-" {
+		trustedKey, err = identity.ParseCredential(PeerKey)
+		if err != nil {
+			panic("invalid key: " + err.Error())
+		}
+	}
+
 	stream, err := client.Recv(MyID)
 	if err != nil {
 		panic("cannot get stream: " + err.Error())
@@ -63,7 +84,10 @@ func main() {
 	}
 
 	pb, salt := secret.GetPublicKey(), secret.GetSalt()
-	err = client.Send(PeerID, slices.Concat(salt, pb))
+	keys := slices.Concat(salt, pb)
+	sig := creds.Sign(keys)
+
+	err = client.Send(PeerID, slices.Concat(keys, sig))
 	if err != nil {
 		panic("cannot send message : " + err.Error())
 	}
@@ -72,7 +96,17 @@ func main() {
 	if !ok {
 		panic("websocket closed")
 	}
-	salt, pb = auth_response[:len(salt)], auth_response[len(salt):]
+	salt = auth_response[:len(salt)]
+	pb = auth_response[len(salt) : len(salt)+len(pb)]
+	sig = auth_response[len(salt)+len(pb) : len(salt)+len(pb)+64]
+	if trustedKey != nil {
+		err = identity.Verify(auth_response[:len(salt)+len(pb)], sig, trustedKey)
+		if err != nil {
+			fmt.Printf("[WARN] ed25519 not verified\n")
+		}
+	} else {
+		fmt.Printf("[WARN] not using ed25519 allows MITM\n")
+	}
 
 	err = secret.SetUpSharedKey(pb, salt)
 	if err != nil {
