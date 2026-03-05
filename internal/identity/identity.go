@@ -3,8 +3,12 @@ package identity
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"errors"
+	"fmt"
+	"os"
 )
 
 var (
@@ -22,6 +26,47 @@ func GenerateCredential() (*Credential, error) {
 		return nil, err
 	}
 	return &Credential{signingKey: priv, PublicKey: pub}, nil
+}
+
+func LoadCredential(path string) (*Credential, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read credential file: %w", err)
+	}
+
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode PEM block")
+	}
+
+	privKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key: %w", err)
+	}
+
+	priv, ok := privKey.(ed25519.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("expected ed25519 private key, got %T", privKey)
+	}
+
+	return &Credential{
+		signingKey: priv,
+		PublicKey:  priv.Public().(ed25519.PublicKey),
+	}, nil
+}
+
+func (c *Credential) Save(path string) error {
+	privBytes, err := x509.MarshalPKCS8PrivateKey(c.signingKey)
+	if err != nil {
+		return fmt.Errorf("marshal private key: %w", err)
+	}
+
+	block := &pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: privBytes,
+	}
+
+	return os.WriteFile(path, pem.EncodeToMemory(block), 0600)
 }
 
 func (c *Credential) Sign(data []byte) []byte {
