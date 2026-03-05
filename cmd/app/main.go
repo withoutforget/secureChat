@@ -26,9 +26,8 @@ import (
 )
 
 const (
-	defaultServer = "http://localhost:8080"
-	windowWidth   = 850
-	windowHeight  = 550
+	windowWidth  = 850
+	windowHeight = 550
 )
 
 var GConfig config.Config
