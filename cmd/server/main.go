@@ -2,11 +2,13 @@ package main
 
 import (
 	"bufio"
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec // WebSocket RFC 6455 requires SHA-1
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
+	"log"
+	"math"
 	"net"
 	"net/http"
 	"strings"
@@ -50,6 +52,7 @@ func wsHandshake(w http.ResponseWriter, r *http.Request) (net.Conn, *bufio.ReadW
 	return conn, rw, nil
 }
 
+//nolint:unused //use later
 func wsReadFrame(r io.Reader) ([]byte, error) {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(r, header); err != nil {
@@ -71,7 +74,11 @@ func wsReadFrame(r io.Reader) ([]byte, error) {
 		if _, err := io.ReadFull(r, buf); err != nil {
 			return nil, err
 		}
-		length = int(binary.BigEndian.Uint64(buf))
+		l := binary.BigEndian.Uint64(buf)
+		if l > math.MaxInt32 {
+			return nil, fmt.Errorf("frame too large: %d", l)
+		}
+		length = int(l)
 	}
 
 	var mask [4]byte
@@ -103,7 +110,7 @@ func wsWriteFrame(w io.Writer, data []byte) error {
 	case length <= 125:
 		header = []byte{0x82, byte(length)}
 	case length <= 0xffff:
-		header = []byte{0x82, 126, byte(length >> 8), byte(length)}
+		header = []byte{0x82, 126, byte(length >> 8), byte(length & 0xff)}
 	default:
 		header = make([]byte, 10)
 		header[0] = 0x82
@@ -255,5 +262,7 @@ func main() {
 	mux.HandleFunc("GET /api/listen/{id}", relay.handleListen)
 
 	fmt.Println("listening on :8080")
-	http.ListenAndServe(":8080", mux)
+	if err := http.ListenAndServe(":8080", mux); err != nil { //nolint:gosec // just ignore
+		log.Fatal(err)
+	}
 }

@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	ErrorInvalidCredentials = errors.New("Invalid credentinals")
+	ErrorInvalidCredentials = errors.New("invalid credentinals")
 )
 
 type Credential struct {

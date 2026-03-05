@@ -1,0 +1,153 @@
+# Полностью навайбкоженный конфиг, просто ради приличия поставил
+version: "2"
+
+run:
+  timeout: 3m
+  relative-path-mode: gomod
+  tests: true
+  modules-download-mode: readonly
+
+linters:
+  default: standard   # включает базовый набор: govet, errcheck, staticcheck и др.
+  enable:
+    # --- Баги ---
+    - bodyclose      # http.Response.Body всегда должен закрываться
+    - contextcheck   # правильная передача context через цепочку вызовов
+    - copyloopvar    # Go 1.22+: захват переменной цикла по ссылке
+    - errorlint      # errors.Is/As вместо прямого сравнения
+    - nilerr         # случаи вида: if err == nil { return nil, err }
+    # noctx отключён — CLI-клиент, context.Background() был бы формальностью
+    - unparam        # аргументы функций, которые всегда одинаковы
+
+    # --- Качество кода ---
+    - cyclop         # цикломатическая сложность
+    - funlen         # слишком длинные функции
+    - gocognit       # когнитивная сложность (важно для crypto-кода)
+    - goconst        # повторяющиеся строки → константы
+    - gocritic       # широкий набор микро-проверок
+    - gocyclo        # ещё одна метрика сложности
+    - misspell       # опечатки в комментариях
+    - nakedret       # голые return в длинных функциях
+    - nestif         # глубокая вложенность if
+    - nolintlint     # корректное использование //nolint директив
+    - prealloc       # подсказывает где стоит make([]T, 0, n)
+    - revive         # замена устаревшему golint
+    - unconvert      # лишние приведения типов
+    - whitespace     # лишние пустые строки
+
+    # --- Безопасность (критично для крипто-проекта) ---
+    - gosec
+
+    # --- Параллелизм ---
+    - paralleltest   # рекомендует t.Parallel() в тестах
+
+  settings:
+    cyclop:
+      max-complexity: 15
+      skip-tests: true
+
+    funlen:
+      lines: 90        # у тебя есть несколько законно длинных функций (doHandshake, wsRead*)
+      statements: 60
+
+    gocognit:
+      min-complexity: 20
+
+    goconst:
+      min-len: 4
+      min-occurrences: 3
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+      disabled-checks:
+        - ifElseChain  # даёт много шума при обработке ошибок
+
+    gocyclo:
+      min-complexity: 15
+
+    gosec:
+      excludes:
+        # SHA-1 в WebSocket — это часть RFC 6455, не уязвимость
+        - G401
+        # rand.Read в Go 1.20+ никогда не возвращает ошибку, игнорировать безопасно
+        - G104
+        # log injection — err.Error() не является пользовательским вводом
+        - G706
+
+    misspell:
+      locale: US
+
+    nakedret:
+      max-func-lines: 40
+
+    nestif:
+      min-complexity: 6
+
+    nolintlint:
+      allow-unused: false
+      require-explanation: true
+      require-specific: true
+
+    revive:
+      severity: warning
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings        # тексты ошибок в нижнем регистре без точки
+        - name: error-naming
+        - name: exported
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming           # поймает SERVER_URL → serverURL
+        - name: var-declaration
+        - name: receiver-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unreachable-code
+        - name: redefines-builtin-id
+
+  exclusions:
+    presets:
+      - comments              # нет точки в TODO/FIXME и пр.
+      - std-error-handling    # стандартные паттерны обработки ошибок
+      - common-false-positives
+
+    rules:
+      # В тестах ослабляем ограничения на длину и дублирование
+      - path: "_test\\.go"
+        linters:
+          - funlen
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+      rewrite-rules:
+        - pattern: "interface{}"
+          replacement: "any"
+    goimports:
+      local-prefixes:
+        - github.com/withoutforget/secureChat
+
+output:
+  formats:
+    colored-line-number:
+      path: stdout
+  show-stats: true
+  sort-results: true
+  sort-order:
+    - linter
+    - file

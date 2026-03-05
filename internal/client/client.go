@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/rand"
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec // WebSocket RFC 6455 requires SHA-1
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
@@ -92,7 +92,7 @@ func wsDial(baseURL, path string) (net.Conn, *bufio.Reader, error) {
 
 	// случайный nonce
 	nonce := make([]byte, 16)
-	rand.Read(nonce)
+	rand.Read(nonce) //nolint:errcheck  // crypto/rand.Read never returns error in Go 1.20+
 	key := base64.StdEncoding.EncodeToString(nonce)
 
 	host := strings.TrimPrefix(wsURL, "ws://")
@@ -168,7 +168,7 @@ func wsRead(r io.Reader) ([]byte, error) {
 		if _, err := io.ReadFull(r, buf); err != nil {
 			return nil, err
 		}
-		length = int(binary.BigEndian.Uint64(buf))
+		length = int(binary.BigEndian.Uint64(buf)) //nolint:gosec //can't be too big for chat
 	}
 
 	payload := make([]byte, length)

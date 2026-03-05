@@ -17,7 +17,7 @@ import (
 	"github.com/withoutforget/secureChat/internal/message"
 )
 
-const SERVER_URL = "http://localhost:8080"
+const ServerURL = "http://localhost:8080"
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT)
@@ -31,7 +31,7 @@ func main() {
 	}
 	fmt.Printf("ed25519:\"%v\"\n", creds.String())
 
-	c := client.NewClient(SERVER_URL)
+	c := client.NewClient(ServerURL)
 
 	myID, peerID, trustedKey := readSetup(reader, c)
 

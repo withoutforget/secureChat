@@ -4,3 +4,6 @@
 [doc("Run server")]
 @server:
     go run cmd/server/main.go
+[doc("Lint code")]
+@lint:
+    golangci-lint run

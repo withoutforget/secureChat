@@ -8,25 +8,24 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"errors"
-	"fmt"
 	"io"
 
 	"golang.org/x/crypto/hkdf"
 )
 
 var (
-	ErrorInitX25519         = errors.New("Cannot generate key for X25519")
-	ErrorReadingPublicKey   = errors.New("Can't create public key from data")
-	ErrorCreatingSharedKey  = errors.New("Can't create shared key")
-	ErrorCreatingAESKey     = errors.New("Can't create AES key")
-	ErrorCreatingBlock      = errors.New("Can't create Block")
-	ErrorCreatingGCM        = errors.New("Can't create GCM")
-	ErrorDecryptingMessage  = errors.New("Can't decrypt message")
-	ErrorGeneratingSalt     = errors.New("Can't generate salt")
-	ErrorInvalidMessage     = errors.New("Message is too short")
-	ErrorCreatingNonce      = errors.New("Can't create nonce")
-	ErrorCreatingSessionKey = errors.New("Can't create session key")
-	ErrorMergingSalt        = errors.New("Can't merge salt due to different size")
+	ErrorInitX25519         = errors.New("cannot generate key for X25519")
+	ErrorReadingPublicKey   = errors.New("can't create public key from data")
+	ErrorCreatingSharedKey  = errors.New("can't create shared key")
+	ErrorCreatingAESKey     = errors.New("can't create AES key")
+	ErrorCreatingBlock      = errors.New("can't create Block")
+	ErrorCreatingGCM        = errors.New("can't create GCM")
+	ErrorDecryptingMessage  = errors.New("can't decrypt message")
+	ErrorGeneratingSalt     = errors.New("can't generate salt")
+	ErrorInvalidMessage     = errors.New("message is too short")
+	ErrorCreatingNonce      = errors.New("can't create nonce")
+	ErrorCreatingSessionKey = errors.New("can't create session key")
+	ErrorMergingSalt        = errors.New("can't merge salt due to different size")
 )
 
 type SecretMessage struct {
@@ -90,24 +89,21 @@ func (sm *SecretMessage) setupSessionKey(sharedKey, bytesInfo []byte) (aesKey []
 	_, err = io.ReadFull(reader, aesKey)
 	if err != nil {
 		return nil, nil, errors.Join(ErrorCreatingAESKey, err)
-
 	}
 
 	block, err := aes.NewCipher(aesKey)
 	if err != nil {
 		return nil, nil, errors.Join(ErrorCreatingBlock, err)
-
 	}
 
 	gcm, err = cipher.NewGCM(block)
 	if err != nil {
 		return nil, nil, errors.Join(ErrorCreatingGCM, err)
-
 	}
 
 	return aesKey, gcm, nil
 }
-func (sm *SecretMessage) SetUpSharedKey(publicKey []byte, salt []byte) error {
+func (sm *SecretMessage) SetUpSharedKey(publicKey, salt []byte) error {
 	if err := sm.mergeSalt(salt); err != nil {
 		return err
 	}
@@ -119,7 +115,6 @@ func (sm *SecretMessage) SetUpSharedKey(publicKey []byte, salt []byte) error {
 	shared, err := sm.privateKey.ECDH(bobKey)
 	if err != nil {
 		return errors.Join(ErrorCreatingSharedKey, err)
-
 	}
 
 	aesKey, gcm, err := sm.setupSessionKey(shared, []byte("a2b"))
@@ -164,36 +159,4 @@ func (sm *SecretMessage) ReadMessage(payload []byte) ([]byte, error) {
 	}
 
 	return decrypted, nil
-}
-func main() {
-	client1, err := NewSecretMessage()
-	if err != nil {
-		panic(err)
-	}
-
-	client2, err := NewSecretMessage()
-	if err != nil {
-		panic(err)
-	}
-
-	c1Salt, c2Salt := client1.GetSalt(), client2.GetSalt()
-
-	err = client1.SetUpSharedKey(client2.GetPublicKey(), c2Salt)
-	if err != nil {
-		panic(err)
-	}
-	err = client2.SetUpSharedKey(client1.GetPublicKey(), c1Salt)
-	if err != nil {
-		panic(err)
-	}
-
-	enc, err := client1.GenerateMessage([]byte("Hello world from me!"))
-	if err != nil {
-		panic(err)
-	}
-	dec, err := client2.ReadMessage(enc)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println(string(dec))
 }
