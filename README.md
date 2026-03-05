@@ -1,11 +1,14 @@
 # secureChat
+<div align="center">
 
 ![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?logo=go&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-20.10+-2496ED?logo=docker&logoColor=white)
 ![Docker Compose](https://img.shields.io/badge/Docker_Compose-v2-2496ED?logo=docker&logoColor=white)
 ![just](https://img.shields.io/badge/just-task_runner-EFF1F3?logo=just&logoColor=black)
 ![golangci-lint](https://img.shields.io/badge/golangci--lint-v2-yellow)
-![Git](https://img.shields.io/badge/Git-any-F05032?logo=git&logoColor=white)ww
+![Git](https://img.shields.io/badge/Git-any-F05032?logo=git&logoColor=white)
+
+</div>
 
 ---
 
@@ -26,8 +29,8 @@ just client # запускает клиент
 
 ## Example
 
-p.s. Сейчас тут нет ed25519, потому что, по сути, он работает независимо от этой схемы.
-При самой передаче сообщения с солью и публчиным ключом надо его отправлять.
+p.s. В примере нет ed25519, потому что, по сути, он работает независимо от этой схемы.
+При самой передаче сообщения с солью и публчиным ключом надо его отправлять. В фактической реализации он присутствует.
 
 ```go
 func main() {
