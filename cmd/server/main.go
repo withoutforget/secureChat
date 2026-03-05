@@ -2,21 +2,25 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha1" //nolint:gosec // WebSocket RFC 6455 requires SHA-1
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"log"
-	"math"
+	"log/slog"
 	"net"
 	"net/http"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 const ttl = time.Minute
+const ServerAddr = ":8080"
 
 // ── Logger ────────────────────────────────────────────────────────────────────
 
@@ -64,56 +68,6 @@ func wsHandshake(w http.ResponseWriter, r *http.Request) (net.Conn, *bufio.ReadW
 	rw.Flush()
 
 	return conn, rw, nil
-}
-
-//nolint:unused //use later
-func wsReadFrame(r io.Reader) ([]byte, error) {
-	header := make([]byte, 2)
-	if _, err := io.ReadFull(r, header); err != nil {
-		return nil, err
-	}
-
-	length := int(header[1] & 0x7f)
-	masked := header[1]&0x80 != 0
-
-	switch length {
-	case 126:
-		buf := make([]byte, 2)
-		if _, err := io.ReadFull(r, buf); err != nil {
-			return nil, err
-		}
-		length = int(binary.BigEndian.Uint16(buf))
-	case 127:
-		buf := make([]byte, 8)
-		if _, err := io.ReadFull(r, buf); err != nil {
-			return nil, err
-		}
-		l := binary.BigEndian.Uint64(buf)
-		if l > math.MaxInt32 {
-			return nil, fmt.Errorf("frame too large: %d", l)
-		}
-		length = int(l)
-	}
-
-	var mask [4]byte
-	if masked {
-		if _, err := io.ReadFull(r, mask[:]); err != nil {
-			return nil, err
-		}
-	}
-
-	payload := make([]byte, length)
-	if _, err := io.ReadFull(r, payload); err != nil {
-		return nil, err
-	}
-
-	if masked {
-		for i := range payload {
-			payload[i] ^= mask[i%4]
-		}
-	}
-
-	return payload, nil
 }
 
 func wsWriteFrame(w io.Writer, data []byte) error {
@@ -303,7 +257,7 @@ func truncate(data []byte, max int) string {
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
-func main() {
+func GetHandlers() *http.ServeMux {
 	relay := NewRelay()
 
 	mux := http.NewServeMux()
@@ -312,8 +266,39 @@ func main() {
 	mux.HandleFunc("POST /api/send/{id}", relay.handleSend)
 	mux.HandleFunc("GET /api/listen/{id}", relay.handleListen)
 
-	fmt.Println("listening on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil { //nolint:gosec // just ignore
-		log.Fatal(err)
+	return mux
+}
+
+func main() {
+	ctx, cancel := signal.NotifyContext(context.Background(),
+		syscall.SIGINT,
+		syscall.SIGABRT,
+		syscall.SIGKILL,
+		syscall.SIGTERM,
+	)
+	defer cancel()
+
+	srv := &http.Server{
+		Addr:              ServerAddr,
+		Handler:           GetHandlers(),
+		ReadTimeout:       3 * time.Second,
+		WriteTimeout:      0 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		ReadHeaderTimeout: 2 * time.Second,
+		MaxHeaderBytes:    4096,
 	}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil {
+			slog.Error("Something went wrong during start", slog.String("error", err.Error()))
+		}
+	}()
+
+	<-ctx.Done()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		slog.Error("Something went wrong during shutdown", slog.String("error", err.Error()))
+		return
+	}
+	slog.Info("server shutting down")
 }
