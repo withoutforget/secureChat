@@ -14,6 +14,39 @@ import (
 	"strings"
 )
 
+// Envelope is a framed message: sender ID + payload.
+type Envelope struct {
+	From string
+	Data []byte
+}
+
+// frame packs senderID + data into wire format:
+//
+//	[1 byte: len(from)] [from] [payload]
+func frame(from string, data []byte) []byte {
+	buf := make([]byte, 1+len(from)+len(data))
+	buf[0] = byte(len(from))
+	copy(buf[1:], from)
+	copy(buf[1+len(from):], data)
+	return buf
+}
+
+// unframe parses a framed message back into an Envelope.
+func unframe(raw []byte) (Envelope, error) {
+	if len(raw) < 1 {
+		return Envelope{}, fmt.Errorf("empty frame")
+	}
+	n := int(raw[0])
+	if len(raw) < 1+n {
+		return Envelope{}, fmt.Errorf("frame too short for sender id (need %d, have %d)", 1+n, len(raw))
+	}
+	return Envelope{
+		From: string(raw[1 : 1+n]),
+		Data: raw[1+n:],
+	}, nil
+}
+
+// HTTPClient implements Client via plain HTTP + a minimal WebSocket.
 type HTTPClient struct {
 	url string
 }
@@ -22,63 +55,64 @@ func NewClient(url string) *HTTPClient {
 	return &HTTPClient{url: url}
 }
 
-func (c *HTTPClient) Take(id string) error {
-	resp, err := http.Post(c.url+"/api/take/"+id, "", nil)
+// doPost is a shared helper that eliminates repeated HTTP boilerplate.
+func (c *HTTPClient) doPost(path string, body []byte) error {
+	var bodyReader io.Reader
+	contentType := ""
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
+		contentType = "application/octet-stream"
+	}
+
+	resp, err := http.Post(c.url+path, contentType, bodyReader) //nolint:noctx // CLI client
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("%d: %s", resp.StatusCode, raw)
 	}
 	return nil
+}
+
+func (c *HTTPClient) Take(id string) error {
+	return c.doPost("/api/take/"+id, nil)
 }
 
 func (c *HTTPClient) Keep(id string) error {
-	resp, err := http.Post(c.url+"/api/keep/"+id, "", nil)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%d: %s", resp.StatusCode, raw)
-	}
-	return nil
+	return c.doPost("/api/keep/"+id, nil)
 }
 
-func (c *HTTPClient) Send(id string, data []byte) error {
-	resp, err := http.Post(c.url+"/api/send/"+id, "application/octet-stream", bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%d: %s", resp.StatusCode, raw)
-	}
-	return nil
+// Send wraps data with senderID and sends to targetID's slot.
+func (c *HTTPClient) Send(targetID string, senderID string, data []byte) error {
+	return c.doPost("/api/send/"+targetID, frame(senderID, data))
 }
 
-// Recv подключается к /api/listen/{id} по WebSocket и возвращает канал.
-// Канал закрывается когда соединение разрывается (сервер убил ID или сеть упала).
-func (c *HTTPClient) Recv(id string) (<-chan []byte, error) {
+// Recv opens a single WebSocket to /api/listen/{id} and returns
+// a channel of Envelope (sender + payload already split).
+// The channel is closed when the connection drops.
+func (c *HTTPClient) Recv(id string) (<-chan Envelope, error) {
 	conn, r, err := wsDial(c.url, "/api/listen/"+id)
 	if err != nil {
 		return nil, err
 	}
 
-	ch := make(chan []byte, 64)
+	ch := make(chan Envelope, 64)
 	go func() {
 		defer close(ch)
 		defer conn.Close()
 		for {
-			frame, err := wsRead(r)
+			raw, err := wsRead(r)
 			if err != nil {
 				return
 			}
-			ch <- frame
+			env, err := unframe(raw)
+			if err != nil {
+				continue // skip malformed frames
+			}
+			ch <- env
 		}
 	}()
 
@@ -90,7 +124,6 @@ func (c *HTTPClient) Recv(id string) (<-chan []byte, error) {
 func wsDial(baseURL, path string) (net.Conn, *bufio.Reader, error) {
 	wsURL := "ws" + strings.TrimPrefix(baseURL, "http")
 
-	// случайный nonce
 	nonce := make([]byte, 16)
 	rand.Read(nonce) //nolint:errcheck  // crypto/rand.Read never returns error in Go 1.20+
 	key := base64.StdEncoding.EncodeToString(nonce)
@@ -120,7 +153,6 @@ func wsDial(baseURL, path string) (net.Conn, *bufio.Reader, error) {
 
 	r := bufio.NewReader(conn)
 
-	// проверяем accept
 	h := sha1.New()
 	h.Write([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
 	expectedAccept := base64.StdEncoding.EncodeToString(h.Sum(nil))
@@ -168,7 +200,7 @@ func wsRead(r io.Reader) ([]byte, error) {
 		if _, err := io.ReadFull(r, buf); err != nil {
 			return nil, err
 		}
-		length = int(binary.BigEndian.Uint64(buf)) //nolint:gosec //can't be too big for chat
+		length = int(binary.BigEndian.Uint64(buf)) //nolint:gosec // can't be too big for chat
 	}
 
 	payload := make([]byte, length)

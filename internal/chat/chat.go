@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/withoutforget/secureChat/internal/client"
@@ -13,26 +14,40 @@ import (
 	"github.com/withoutforget/secureChat/internal/message"
 )
 
+const (
+	// HandshakeTimeout is how long ContactWith waits for the peer to respond.
+	HandshakeTimeout = 30 * time.Second
+
+	handshakeRetryInterval = 3 * time.Second
+	// How many extra sends after handshake completes, to make sure the peer gets our hs.
+	handshakeFinalResends = 3
+	handshakeFinalDelay   = 500 * time.Millisecond
+
+	keepAliveInterval = 40 * time.Second
+	inboxBuffer       = 64
+)
+
 var (
-	errRegister  = errors.New("cannot register")
-	errHandshake = errors.New("handshake failed")
+	errRegister     = errors.New("cannot register")
+	errHandshake    = errors.New("handshake failed")
+	errPeerNotFound = errors.New("peer not found")
 )
 
 // ChatInfo holds per-peer session state.
 type ChatInfo struct {
 	Secret  *message.SecretMessage
 	Trusted bool
-	Stream  <-chan []byte
+	inbox   chan []byte
 }
 
 // Chat manages registration, handshake, and encrypted IO with peers.
-// It does NOT touch stdin/stdout — all user interaction goes through channels.
 type Chat struct {
 	ctx    context.Context
 	client client.Client
 	myID   string
 	creds  *identity.Credential
 
+	mu    sync.Mutex
 	peers map[string]*ChatInfo
 }
 
@@ -51,54 +66,96 @@ func NewChat(
 	}
 }
 
-// ID returns the local identifier so the caller can display it.
-func (c *Chat) ID() string { return c.myID }
-
-// PubKeyHex returns the ed25519 public key as hex for display.
+func (c *Chat) ID() string        { return c.myID }
 func (c *Chat) PubKeyHex() string { return c.creds.String() }
 
-// Register claims the ID on the server and starts the keep-alive loop.
+// Register claims the ID on the server, opens a single Recv stream,
+// and starts the keep-alive + router goroutines.
 func (c *Chat) Register() error {
 	if err := c.client.Take(c.myID); err != nil {
 		return fmt.Errorf("%w: %w", errRegister, err)
 	}
+
+	stream, err := c.client.Recv(c.myID)
+	if err != nil {
+		return fmt.Errorf("recv stream: %w", err)
+	}
+
+	go c.router(stream)
 	go c.keepAlive()
 	return nil
+}
+
+func (c *Chat) router(stream <-chan client.Envelope) {
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case env, ok := <-stream:
+			if !ok {
+				return
+			}
+			c.mu.Lock()
+			info, exists := c.peers[env.From]
+			c.mu.Unlock()
+
+			if !exists {
+				slog.Debug("message from unknown peer, dropping",
+					slog.String("from", env.From))
+				continue
+			}
+
+			select {
+			case info.inbox <- env.Data:
+			default:
+				slog.Warn("inbox full, dropping message",
+					slog.String("from", env.From))
+			}
+		}
+	}
 }
 
 // ContactWith performs a handshake with peerID.
 // trustedKey may be nil — in that case the connection is unauthenticated.
 func (c *Chat) ContactWith(peerID string, trustedKey []byte) error {
-	stream, err := c.client.Recv(c.myID)
-	if err != nil {
-		return fmt.Errorf("recv stream: %w", err)
-	}
-	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+	info := &ChatInfo{inbox: make(chan []byte, inboxBuffer)}
+
+	c.mu.Lock()
+	c.peers[peerID] = info
+	c.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(c.ctx, HandshakeTimeout)
 	defer cancel()
-	info, err := c.handshake(ctx, stream, peerID, trustedKey)
-	if err != nil {
+
+	if err := c.handshake(ctx, info, peerID, trustedKey); err != nil {
+		c.mu.Lock()
+		delete(c.peers, peerID)
+		c.mu.Unlock()
 		return fmt.Errorf("handshake with %s: %w", peerID, err)
 	}
 
-	c.peers[peerID] = info
 	return nil
 }
 
-// Trusted reports whether the peer's key was verified.
 func (c *Chat) Trusted(peerID string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	info, ok := c.peers[peerID]
 	if !ok {
-		return false, fmt.Errorf("peer %s: not found", peerID)
+		return false, fmt.Errorf("%w: %s", errPeerNotFound, peerID)
 	}
 	return info.Trusted, nil
 }
 
 // IO returns a read channel and a write channel for the given peer.
-// The caller owns both channels; close write when done sending.
 func (c *Chat) IO(peerID string) (<-chan []byte, chan<- []byte, error) {
+	c.mu.Lock()
 	info, ok := c.peers[peerID]
+	c.mu.Unlock()
+
 	if !ok {
-		return nil, nil, fmt.Errorf("peer %s: not found", peerID)
+		return nil, nil, fmt.Errorf("%w: %s", errPeerNotFound, peerID)
 	}
 
 	read := make(chan []byte)
@@ -116,13 +173,16 @@ func (c *Chat) readLoop(info *ChatInfo, out chan<- []byte) {
 		select {
 		case <-c.ctx.Done():
 			return
-		case raw, ok := <-info.Stream:
+		case raw, ok := <-info.inbox:
 			if !ok {
 				return
 			}
 			plain, err := info.Secret.ReadMessage(raw)
 			if err != nil {
-				slog.Warn("decrypt failed", slog.String("err", err.Error()))
+				// Expected after handshake: stale retry messages from
+				// the peer land here and can't be decrypted. Skip them.
+				slog.Debug("decrypt failed (likely stale handshake), skipping",
+					slog.String("err", err.Error()))
 				continue
 			}
 			select {
@@ -148,16 +208,15 @@ func (c *Chat) writeLoop(info *ChatInfo, peerID string, in <-chan []byte) {
 				slog.Warn("encrypt failed", slog.String("err", err.Error()))
 				continue
 			}
-			if err := c.client.Send(peerID, cipher); err != nil {
+			if err := c.client.Send(peerID, c.myID, cipher); err != nil {
 				slog.Warn("send failed", slog.String("err", err.Error()))
 			}
 		}
 	}
 }
 
-// keepAlive periodically pings the server so the ID stays reserved.
 func (c *Chat) keepAlive() {
-	ticker := time.NewTicker(40 * time.Second)
+	ticker := time.NewTicker(keepAliveInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -172,38 +231,87 @@ func (c *Chat) keepAlive() {
 }
 
 // handshake exchanges DH keys and (optionally) verifies the peer's ed25519 signature.
+//
+// Both peers run the same logic:
+//  1. send our pub+salt+sig
+//  2. retry every 3 s (peer's router may not know us yet)
+//  3. wait for peer's pub+salt+sig
+//  4. after receiving — send our message a few more times so the peer
+//     is guaranteed to get it (fixes the race where we complete and
+//     stop retrying before the peer has registered us)
 func (c *Chat) handshake(
 	ctx context.Context,
-	stream <-chan []byte,
+	info *ChatInfo,
 	peerID string,
 	trustedKey []byte,
-) (*ChatInfo, error) {
+) error {
 	secret, err := message.NewSecretMessage()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	pub, salt := secret.GetPublicKey(), secret.GetSalt()
 	payload := slices.Concat(salt, pub)
 	sig := c.creds.Sign(payload)
+	hsMsg := slices.Concat(payload, sig)
 
-	if err := c.client.Send(peerID, slices.Concat(payload, sig)); err != nil {
-		return nil, fmt.Errorf("send handshake: %w", err)
+	// ── phase 1: send + retry ────────────────────────────────────────────
+
+	if err := c.client.Send(peerID, c.myID, hsMsg); err != nil {
+		return fmt.Errorf("send handshake: %w", err)
 	}
-	var resp []byte
 
+	retryDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(handshakeRetryInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-retryDone:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				_ = c.client.Send(peerID, c.myID, hsMsg)
+			}
+		}
+	}()
+
+	// ── phase 2: wait for peer's handshake ───────────────────────────────
+
+	var resp []byte
 	select {
-	case tmp, ok := <-stream:
+	case tmp, ok := <-info.inbox:
 		if !ok {
-			return nil, fmt.Errorf("%w: stream closed before response", errHandshake)
+			close(retryDone)
+			return fmt.Errorf("%w: inbox closed before response", errHandshake)
 		}
 		resp = tmp
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		close(retryDone)
+		return ctx.Err()
 	}
-	if !(len(resp) >= len(salt)+len(pub)+64) {
-		return nil, errors.New("too short response")
+	close(retryDone)
+
+	// ── phase 3: final resends ───────────────────────────────────────────
+	// The peer may have just registered us in their peers map.
+	// Their earlier retries were dropped by our router (we weren't in their map),
+	// and they received OUR message and completed — stopping THEIR retries.
+	// So we must send a few more times to make sure they get ours.
+	go func() {
+		for range handshakeFinalResends {
+			time.Sleep(handshakeFinalDelay)
+			_ = c.client.Send(peerID, c.myID, hsMsg)
+		}
+	}()
+
+	// ── phase 4: verify + derive keys ────────────────────────────────────
+
+	minLen := len(salt) + len(pub) + 64
+	if len(resp) < minLen {
+		return fmt.Errorf("%w: response too short (%d < %d)", errHandshake, len(resp), minLen)
 	}
+
 	peerSalt := resp[:len(salt)]
 	peerPub := resp[len(salt) : len(salt)+len(pub)]
 	peerSig := resp[len(salt)+len(pub) : len(salt)+len(pub)+64]
@@ -218,12 +326,10 @@ func (c *Chat) handshake(
 	}
 
 	if err := secret.SetUpSharedKey(peerPub, peerSalt); err != nil {
-		return nil, fmt.Errorf("shared key: %w", err)
+		return fmt.Errorf("shared key: %w", err)
 	}
 
-	return &ChatInfo{
-		Secret:  secret,
-		Trusted: trusted,
-		Stream:  stream,
-	}, nil
+	info.Secret = secret
+	info.Trusted = trusted
+	return nil
 }

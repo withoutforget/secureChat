@@ -18,6 +18,20 @@ import (
 
 const ttl = time.Minute
 
+// ── Logger ────────────────────────────────────────────────────────────────────
+
+var logger = log.New(log.Writer(), "", 0)
+
+func logf(r *http.Request, format string, args ...any) {
+	ip := r.RemoteAddr
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		ip = strings.SplitN(fwd, ",", 2)[0]
+	}
+	ts := time.Now().Format("2006-01-02 15:04:05.000")
+	msg := fmt.Sprintf(format, args...)
+	logger.Printf("[%s] %s — %s", ts, ip, msg)
+}
+
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 
 func wsHandshake(w http.ResponseWriter, r *http.Request) (net.Conn, *bufio.ReadWriter, error) {
@@ -150,6 +164,8 @@ func (r *Relay) reaper() {
 		r.mu.Lock()
 		for id, s := range r.slots {
 			if now.After(s.expiresAt) {
+				log.Printf("[%s] reaper — slot %q expired, closing",
+					time.Now().Format("2006-01-02 15:04:05.000"), id)
 				close(s.done)
 				delete(r.slots, id)
 			}
@@ -164,6 +180,7 @@ func (r *Relay) handleTake(w http.ResponseWriter, req *http.Request) {
 	defer r.mu.Unlock()
 
 	if _, exists := r.slots[id]; exists {
+		logf(req, "TAKE %q — conflict, already taken", id)
 		http.Error(w, "id already taken", http.StatusConflict)
 		return
 	}
@@ -172,6 +189,7 @@ func (r *Relay) handleTake(w http.ResponseWriter, req *http.Request) {
 		send:      make(chan []byte, 64),
 		done:      make(chan struct{}),
 	}
+	logf(req, "TAKE %q — registered, ttl=%s", id, ttl)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -182,10 +200,12 @@ func (r *Relay) handleKeep(w http.ResponseWriter, req *http.Request) {
 
 	s, exists := r.slots[id]
 	if !exists {
+		logf(req, "KEEP %q — not found", id)
 		http.Error(w, "id not found", http.StatusNotFound)
 		return
 	}
 	s.expiresAt = time.Now().Add(ttl)
+	logf(req, "KEEP %q — ttl extended", id)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -197,20 +217,24 @@ func (r *Relay) handleSend(w http.ResponseWriter, req *http.Request) {
 	r.mu.Unlock()
 
 	if !exists {
+		logf(req, "SEND %q — not found", id)
 		http.Error(w, "id not found", http.StatusNotFound)
 		return
 	}
 
 	data, err := io.ReadAll(req.Body)
 	if err != nil {
+		logf(req, "SEND %q — read error: %v", id, err)
 		http.Error(w, "read error", http.StatusBadRequest)
 		return
 	}
 
 	select {
 	case s.send <- data:
+		logf(req, "SEND %q — %d bytes queued: %q", id, len(data), truncate(data, 120))
 		w.WriteHeader(http.StatusOK)
 	default:
+		logf(req, "SEND %q — buffer full, dropped %d bytes", id, len(data))
 		http.Error(w, "buffer full", http.StatusServiceUnavailable)
 	}
 }
@@ -222,33 +246,59 @@ func (r *Relay) handleListen(w http.ResponseWriter, req *http.Request) {
 	r.mu.Unlock()
 
 	if !exists {
+		logf(req, "LISTEN %q — not found", id)
 		http.Error(w, "id not found", http.StatusNotFound)
 		return
 	}
 
 	if !strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
+		logf(req, "LISTEN %q — missing websocket upgrade", id)
 		http.Error(w, "websocket required", http.StatusBadRequest)
 		return
 	}
 
 	conn, rw, err := wsHandshake(w, req)
 	if err != nil {
+		logf(req, "LISTEN %q — handshake error: %v", id, err)
 		return
 	}
 	defer conn.Close()
 
+	logf(req, "LISTEN %q — websocket connected", id)
+	sent := 0
+
 	for {
 		select {
 		case <-s.done:
+			logf(req, "LISTEN %q — slot expired, closing (sent %d messages)", id, sent)
 			rw.Flush()
 			return
 		case msg := <-s.send:
 			if err := wsWriteFrame(rw, msg); err != nil {
+				logf(req, "LISTEN %q — write error after %d messages: %v", id, sent, err)
 				return
 			}
 			rw.Flush()
+			sent++
+			logf(req, "LISTEN %q — delivered msg #%d (%d bytes)", id, sent, len(msg))
 		}
 	}
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+// truncate returns a printable snippet of data, safe for logs.
+func truncate(data []byte, max int) string {
+	s := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '.'
+		}
+		return r
+	}, string(data))
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
