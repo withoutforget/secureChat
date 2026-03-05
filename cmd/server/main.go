@@ -36,6 +36,45 @@ func logf(r *http.Request, format string, args ...any) {
 	logger.Printf("[%s] %s — %s", ts, ip, msg)
 }
 
+func logRequest(r *http.Request, status int, dur time.Duration) {
+	ip := r.Header.Get("X-Forwarded-For")
+	if ip == "" {
+		ip, _, _ = net.SplitHostPort(r.RemoteAddr)
+	}
+
+	fmt.Printf("[%s] %-7s %-30s %d  %.2fms  %s\n",
+		time.Now().Format("15:04:05.000"),
+		r.Method,
+		r.URL.Path,
+		status,
+		float64(dur.Microseconds())/1000,
+		ip,
+	)
+}
+
+type rw struct {
+	http.ResponseWriter
+	code int
+}
+
+func (r *rw) WriteHeader(code int) { r.code = code; r.ResponseWriter.WriteHeader(code) }
+
+func (r *rw) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("no hijacker")
+	}
+	return h.Hijack()
+}
+func withLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		wrapped := &rw{w, 200}
+		next.ServeHTTP(wrapped, r)
+		logRequest(r, wrapped.code, time.Since(start))
+	})
+}
+
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 
 func wsHandshake(w http.ResponseWriter, r *http.Request) (net.Conn, *bufio.ReadWriter, error) {
@@ -280,7 +319,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              ServerAddr,
-		Handler:           GetHandlers(),
+		Handler:           withLogger(GetHandlers()),
 		ReadTimeout:       3 * time.Second,
 		WriteTimeout:      0 * time.Second,
 		IdleTimeout:       60 * time.Second,
