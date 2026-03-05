@@ -77,7 +77,7 @@ Endpoint security: если устройство пользователя ско
 - Windows (кросс-компиляция): mingw-w64
 
 ### Установка
-```sh
+```bash
 # Клонировать репозиторий
 git clone https://github.com/withoutforget/secureChat.git
 cd secureChat
