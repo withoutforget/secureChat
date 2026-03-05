@@ -21,6 +21,7 @@ import (
 
 	"github.com/withoutforget/secureChat/internal/chat"
 	"github.com/withoutforget/secureChat/internal/client"
+	"github.com/withoutforget/secureChat/internal/config"
 	"github.com/withoutforget/secureChat/internal/identity"
 )
 
@@ -29,6 +30,8 @@ const (
 	windowWidth   = 850
 	windowHeight  = 550
 )
+
+var GConfig config.Config
 
 // ── data ──────────────────────────────────────────────────────────────────────
 
@@ -125,7 +128,7 @@ func showLogin(_ fyne.App, w fyne.Window) {
 
 	// ── Server row ──
 	serverEntry := widget.NewEntry()
-	serverEntry.SetText(defaultServer)
+	serverEntry.SetText(GConfig.Server.Url)
 
 	// ── Enter ──
 	errorLbl := widget.NewLabel("")
@@ -140,6 +143,11 @@ func showLogin(_ fyne.App, w fyne.Window) {
 		if serverURL == "" {
 			errorLbl.SetText("Server URL is required")
 			return
+		} else {
+			if serverURL != GConfig.Server.Url {
+				GConfig.Server.Url = serverURL
+				GConfig.SaveConfig(config.GetConfigPath())
+			}
 		}
 
 		// auto-generate key if not loaded
@@ -484,6 +492,8 @@ func truncate(s string, n int) string {
 
 func main() {
 	slog.SetLogLoggerLevel(slog.LevelDebug)
+
+	GConfig = config.ConfigInit()
 
 	a := app.New()
 	w := a.NewWindow("secureChat")
