@@ -73,8 +73,9 @@ func (c *Chat) ContactWith(peerID string, trustedKey []byte) error {
 	if err != nil {
 		return fmt.Errorf("recv stream: %w", err)
 	}
-
-	info, err := c.handshake(stream, peerID, trustedKey)
+	ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+	defer cancel()
+	info, err := c.handshake(ctx, stream, peerID, trustedKey)
 	if err != nil {
 		return fmt.Errorf("handshake with %s: %w", peerID, err)
 	}
@@ -172,6 +173,7 @@ func (c *Chat) keepAlive() {
 
 // handshake exchanges DH keys and (optionally) verifies the peer's ed25519 signature.
 func (c *Chat) handshake(
+	ctx context.Context,
 	stream <-chan []byte,
 	peerID string,
 	trustedKey []byte,
@@ -196,10 +198,12 @@ func (c *Chat) handshake(
 			return nil, fmt.Errorf("%w: stream closed before response", errHandshake)
 		}
 		resp = tmp
-	case <-c.ctx.Done():
-		return nil, c.ctx.Err()
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-
+	if !(len(resp) >= len(salt)+len(pub)+64) {
+		return nil, errors.New("too short response")
+	}
 	peerSalt := resp[:len(salt)]
 	peerPub := resp[len(salt) : len(salt)+len(pub)]
 	peerSig := resp[len(salt)+len(pub) : len(salt)+len(pub)+64]

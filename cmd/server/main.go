@@ -190,6 +190,7 @@ func (r *Relay) handleKeep(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Relay) handleSend(w http.ResponseWriter, req *http.Request) {
+	http.MaxBytesReader(w, req.Body, 1<<20)
 	id := req.PathValue("id")
 	r.mu.Lock()
 	s, exists := r.slots[id]

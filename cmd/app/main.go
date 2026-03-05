@@ -1,16 +1,27 @@
+/*
+----------------------------------------
+Сейчас тут всё навайбкожено, но работает.
+потом буду править.
+----------------------------------------
+*/
+
 package main
 
 import (
-	"bufio"
-	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"log/slog"
-	"os"
-	"os/signal"
 	"strings"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/widget"
+
+	"context"
+	"crypto/rand"
+	"log/slog"
+	"os/signal"
 	"syscall"
 
 	"github.com/withoutforget/secureChat/internal/chat"
@@ -20,84 +31,138 @@ import (
 
 const serverURL = "http://localhost:8080"
 
-func runTUI(ctx context.Context, chat *chat.Chat) {
-	scanner := bufio.NewScanner(os.Stdin)
+var (
+	a       fyne.App
+	w       fyne.Window
+	content *fyne.Container // сюда подставляем экраны
+)
 
-	fmt.Print("peer id: ")
-	if !scanner.Scan() {
-		return
-	}
-	peerID := strings.TrimSpace(scanner.Text())
+// Шапка — всегда видна
+func makeHeader(c *chat.Chat) fyne.CanvasObject {
+	pubEntry := widget.NewEntry()
+	pubEntry.SetText(c.PubKeyHex())
+	pubEntry.Disable()
 
-	fmt.Print("trusted key (hex, enter to skip): ")
-	if !scanner.Scan() {
-		return
-	}
-	var trustedKey []byte
-	if raw := strings.TrimSpace(scanner.Text()); raw != "" {
-		var err error
-		trustedKey, err = base64.StdEncoding.DecodeString(raw)
-		if err != nil {
-			trustedKey, err = hex.DecodeString(raw)
-		}
-		if err != nil {
-			slog.Error("bad key (expected base64 or hex)", slog.String("err", err.Error()))
-			return
-		}
-	}
+	idEntry := widget.NewEntry()
+	idEntry.SetText(c.ID())
+	idEntry.Disable()
 
-	if err := chat.ContactWith(peerID, trustedKey); err != nil {
-		slog.Error("contact", slog.String("err", err.Error()))
-		return
-	}
+	return container.NewVBox(
+		container.NewGridWithColumns(2,
+			widget.NewLabel("ID:"), idEntry,
+			widget.NewLabel("PubKey:"), pubEntry,
+		),
+		widget.NewSeparator(),
+	)
+}
 
-	trusted, _ := chat.Trusted(peerID)
-	if !trusted {
-		fmt.Println("[WARN] connection is NOT authenticated — MITM possible")
-	}
+// Экран подключения
+func showConnect(c *chat.Chat) {
+	peerIDEntry := widget.NewEntry()
+	peerIDEntry.SetPlaceHolder("Peer ID")
 
-	read, write, err := chat.IO(peerID)
-	if err != nil {
-		slog.Error("io", slog.String("err", err.Error()))
-		return
-	}
+	peerKeyEntry := widget.NewEntry()
+	peerKeyEntry.SetPlaceHolder("Trusted key (hex/base64, необязательно)")
 
-	// incoming messages
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
+	statusLabel := widget.NewLabel("")
+
+	content.Objects[1] = container.NewVBox(
+		widget.NewLabel("Подключиться к пиру:"),
+		peerIDEntry,
+		peerKeyEntry,
+		statusLabel,
+		widget.NewButton("Подключиться", func() {
+			peerID := strings.TrimSpace(peerIDEntry.Text)
+			if peerID == "" {
+				statusLabel.SetText("Введите Peer ID")
 				return
-			case msg, ok := <-read:
-				if !ok {
+			}
+
+			var trustedKey []byte
+			if raw := strings.TrimSpace(peerKeyEntry.Text); raw != "" {
+				var err error
+				trustedKey, err = base64.StdEncoding.DecodeString(raw)
+				if err != nil {
+					trustedKey, err = hex.DecodeString(raw)
+				}
+				if err != nil {
+					statusLabel.SetText("Неверный формат ключа")
 					return
 				}
-				fmt.Printf("\r[%s]: %s\n> ", peerID, msg)
 			}
+
+			if err := c.ContactWith(peerID, trustedKey); err != nil {
+				statusLabel.SetText("Ошибка: " + err.Error())
+				return
+			}
+
+			trusted, _ := c.Trusted(peerID)
+			showChat(c, peerID, trusted)
+		}),
+	)
+	content.Refresh()
+}
+
+// Экран чата
+func showChat(c *chat.Chat, peerID string, trusted bool) {
+	msgText := ""
+	msgLabel := widget.NewLabel("")
+	msgLabel.Wrapping = fyne.TextWrapWord
+
+	scroll := container.NewScroll(msgLabel)
+	scroll.SetMinSize(fyne.NewSize(460, 280))
+
+	addMessage := func(who, text string) {
+		msgText += fmt.Sprintf("[%s]: %s\n", who, text)
+		msgLabel.SetText(msgText)
+		scroll.ScrollToBottom()
+	}
+
+	input := widget.NewEntry()
+	input.SetPlaceHolder("Сообщение...")
+
+	read, write, err := c.IO(peerID)
+	if err != nil {
+		showConnect(c)
+		return
+	}
+
+	go func() {
+		for msg := range read {
+			msg := msg
+			fyne.Do(func() { addMessage(peerID, string(msg)) })
 		}
 	}()
 
-	// outgoing messages
-	for {
-		fmt.Print("> ")
-		select {
-		case <-ctx.Done():
+	sendBtn := widget.NewButton("→", func() {
+		text := strings.TrimSpace(input.Text)
+		if text == "" {
 			return
-		default:
-			if !scanner.Scan() {
-				return
-			}
-			line := strings.TrimSpace(scanner.Text())
-			if line == "" {
-				continue
-			}
-			select {
-			case write <- []byte(line):
-			case <-ctx.Done():
-				return
-			}
 		}
+		write <- []byte(text)
+		addMessage("Вы", text)
+		input.SetText("")
+	})
+
+	input.OnSubmitted = func(_ string) { sendBtn.OnTapped() }
+
+	warn := widget.NewLabel("")
+	if !trusted {
+		warn.SetText("⚠️  Соединение НЕ аутентифицировано — возможен MITM")
 	}
+
+	backBtn := widget.NewButton("← Назад", func() { showConnect(c) })
+
+	content.Objects[1] = container.NewBorder(
+		container.NewVBox(
+			container.NewHBox(backBtn, widget.NewLabel("Чат с: "+peerID)),
+			warn,
+		),
+		container.NewBorder(nil, nil, nil, sendBtn, input),
+		nil, nil,
+		scroll,
+	)
+	content.Refresh()
 }
 
 func generateID() string {
@@ -120,15 +185,24 @@ func main() {
 	}
 
 	id := generateID()
-	chat := chat.NewChat(ctx, c, creds, id)
+	chatInstance := chat.NewChat(ctx, c, creds, id)
 
-	fmt.Printf("ed25519: %s\n", chat.PubKeyHex())
-	fmt.Printf("id:      %s\n", chat.ID())
-
-	if err := chat.Register(); err != nil {
+	if err := chatInstance.Register(); err != nil {
 		slog.Error("register", slog.String("err", err.Error()))
 		return
 	}
 
-	runTUI(ctx, chat)
+	a = app.New()
+	w = a.NewWindow("secureChat")
+	w.Resize(fyne.NewSize(520, 480))
+
+	// content[0] = шапка (всегда), content[1] = текущий экран
+	content = container.NewVBox(
+		makeHeader(chatInstance),
+		widget.NewLabel(""), // placeholder, заменяется
+	)
+
+	w.SetContent(content)
+	showConnect(chatInstance)
+	w.ShowAndRun()
 }
