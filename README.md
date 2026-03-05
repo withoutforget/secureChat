@@ -14,14 +14,9 @@
 
 Минималистичный мессенеджер, который сохранит вашу переписку в тайне. Позволяет общаться двум людям между собой, при этом, никоим образом не позволяя третьей стороне узнать содержимое диалога.
 
-<div align="center">
-  <table>
-    <tr>
-      <td><img src="assets/client_login.png" alt="Login" /></td>
-      <td><img src="assets/client_message.png" alt="Chat" /></td>
-    </tr>
-  </table>
-</div>
+<img src="assets/client_login.png" alt="Login" />
+<img src="assets/client_message.png" alt="Chat" />
+
 
 ---
 
