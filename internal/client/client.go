@@ -14,15 +14,15 @@ import (
 	"strings"
 )
 
-type Client struct {
+type HTTPClient struct {
 	url string
 }
 
-func NewClient(url string) *Client {
-	return &Client{url: url}
+func NewClient(url string) *HTTPClient {
+	return &HTTPClient{url: url}
 }
 
-func (c *Client) Take(id string) error {
+func (c *HTTPClient) Take(id string) error {
 	resp, err := http.Post(c.url+"/api/take/"+id, "", nil)
 	if err != nil {
 		return err
@@ -35,7 +35,7 @@ func (c *Client) Take(id string) error {
 	return nil
 }
 
-func (c *Client) Keep(id string) error {
+func (c *HTTPClient) Keep(id string) error {
 	resp, err := http.Post(c.url+"/api/keep/"+id, "", nil)
 	if err != nil {
 		return err
@@ -48,7 +48,7 @@ func (c *Client) Keep(id string) error {
 	return nil
 }
 
-func (c *Client) Send(id string, data []byte) error {
+func (c *HTTPClient) Send(id string, data []byte) error {
 	resp, err := http.Post(c.url+"/api/send/"+id, "application/octet-stream", bytes.NewReader(data))
 	if err != nil {
 		return err
@@ -63,7 +63,7 @@ func (c *Client) Send(id string, data []byte) error {
 
 // Recv подключается к /api/listen/{id} по WebSocket и возвращает канал.
 // Канал закрывается когда соединение разрывается (сервер убил ID или сеть упала).
-func (c *Client) Recv(id string) (<-chan []byte, error) {
+func (c *HTTPClient) Recv(id string) (<-chan []byte, error) {
 	conn, r, err := wsDial(c.url, "/api/listen/"+id)
 	if err != nil {
 		return nil, err

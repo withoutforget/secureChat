@@ -51,7 +51,7 @@ func main() {
 }
 
 func readSetup(reader *bufio.Reader,
-	c *client.Client) (
+	c *client.HTTPClient) (
 	myID,
 	peerID string,
 	trustedKey []byte,
@@ -83,7 +83,7 @@ func readSetup(reader *bufio.Reader,
 }
 
 func keepAlive(ctx context.Context,
-	c *client.Client,
+	c *client.HTTPClient,
 	myID string,
 ) {
 	ticker := time.NewTicker(40 * time.Second)
@@ -100,7 +100,7 @@ func keepAlive(ctx context.Context,
 	}
 }
 
-func doHandshake(c *client.Client,
+func doHandshake(c *client.HTTPClient,
 	creds *identity.Credential,
 	stream <-chan []byte,
 	peerID string,
@@ -170,7 +170,7 @@ func recvLoop(ctx context.Context,
 
 func sendLoop(ctx context.Context,
 	reader *bufio.Reader,
-	c *client.Client,
+	c *client.HTTPClient,
 	peerID string,
 	secret *message.SecretMessage,
 ) {
